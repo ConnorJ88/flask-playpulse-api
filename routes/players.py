@@ -5,16 +5,27 @@ from services.data_collection import PlayerDataCollector
 player_routes = Blueprint('player_routes', __name__)
 
 @player_routes.route('/<player_id>', methods=['GET'])
+@player_routes.route('/<player_id>', methods=['GET'])
 def get_player(player_id):
     """Get player details by ID"""
+    print(f"API received player_id: {player_id}, type: {type(player_id)}")
+    
     try:
         # Convert player_id to float
         player_id_float = float(player_id)
+        print(f"Converted to float: {player_id_float}")
         
         collector = PlayerDataCollector(player_id=player_id_float)
         
-        if not collector._verify_player_id():
+        print(f"Verifying player ID: {player_id_float}")
+        exists = collector._verify_player_id()
+        print(f"Player verification result: {exists}")
+        
+        if not exists:
+            print(f"Player not found with ID: {player_id_float}")
             return jsonify({'error': 'Player not found'}), 404
+        
+        # Rest of your code...
         
         # Return basic player info
         return jsonify({
