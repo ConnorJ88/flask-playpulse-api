@@ -63,21 +63,47 @@ def get_player_performances(player_id):
     """Get player performance metrics"""
     try:
         # Convert player_id to float
+        print(f"Performance request for player_id: {player_id}")
         player_id_float = float(player_id)
         
-        collector = PlayerDataCollector(player_id=player_id_float)
+        # Create collector with timeout handling
+        collector = PlayerDataCollector(player_id=player_id_float, max_matches=5)  # Reduce to 5 matches for speed
         
-        if not collector.collect_player_data():
-            return jsonify({'error': 'Failed to collect player data'}), 404
+        # Add timeout handling
+        import signal
         
-        if not collector.calculate_performance_metrics():
-            return jsonify({'error': 'Failed to calculate performance metrics'}), 500
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Data collection timed out")
         
-        # Convert performance metrics to JSON
-        performances = collector.performance_metrics.to_dict(orient='records')
+        # Set 45 second timeout for data collection
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(45)
         
-        return jsonify(performances)
+        try:
+            if not collector.collect_player_data():
+                signal.alarm(0)  # Disable alarm
+                return jsonify({'error': 'Failed to collect player data'}), 404
+            
+            if not collector.calculate_performance_metrics():
+                signal.alarm(0)  # Disable alarm
+                return jsonify({'error': 'Failed to calculate performance metrics'}), 500
+            
+            # Convert performance metrics to JSON
+            performances = collector.performance_metrics.to_dict(orient='records')
+            
+            # Disable alarm
+            signal.alarm(0)
+            
+            return jsonify(performances)
+        except TimeoutError as e:
+            print(f"Timeout during data collection: {e}")
+            return jsonify({'error': 'Data collection timed out. Please try again.'}), 504
+        finally:
+            # Ensure alarm is disabled
+            signal.alarm(0)
+            
     except ValueError:
         return jsonify({'error': 'Invalid player ID format'}), 400
     except Exception as e:
+        print(f"Error in get_player_performances: {e}")
         return jsonify({'error': str(e)}), 500

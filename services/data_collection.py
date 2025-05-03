@@ -75,6 +75,8 @@ class PlayerDataCollector:
     def _verify_player_id(self):
         """Verify a player ID exists in the dataset."""
         print(f"Verifying player ID: {self.player_id}, type: {type(self.player_id)}")
+        import os
+        os.environ['STATSBOMB_API'] = 'open'
     
         # Ensure player_id is a float (StatsBomb IDs are always floats)
         if not isinstance(self.player_id, float):
@@ -111,7 +113,7 @@ class PlayerDataCollector:
                     for idx, match in matches.head(3).iterrows():
                         match_id = match['match_id']
                         try:
-                            events = sb.events(match_id=match_id)
+                            events = self._throttled_request(sb.events, match_id=match_id)
                             if events is None or events.empty:
                                 continue
                         
@@ -344,7 +346,23 @@ class PlayerDataCollector:
         
         print(f"Calculated performance metrics for {len(self.performance_metrics)} matches after filtering anomalies")
         return True
+    # Add to data_collection.py
+    def _throttled_request(self, func, *args, **kwargs):
+        """Throttle requests to StatsBomb API to avoid overwhelming it"""
+        max_retries = 3
+        retry_delay = 1  # seconds
     
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"Request failed, retrying in {retry_delay} seconds: {e}")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise e
+
     def _detect_and_handle_anomalies(self):
         """Detect and handle anomalous performances."""
         if self.performance_metrics is None or len(self.performance_metrics) < 4:
