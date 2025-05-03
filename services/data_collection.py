@@ -73,47 +73,66 @@ class PlayerDataCollector:
         return False
     
     def _verify_player_id(self):
-        """Verify a player ID exists in the dataset and get their name."""
-        print(f"Verifying player ID: {self.player_id}...")
-        start_time = time.time()
-        
-        # Get competitions (prioritize more recent ones)
-        competitions = sb.competitions()
-        competitions = competitions.sort_values('season_id', ascending=False)
-        
-        # Limit to checking several competitions
-        checked_competitions = 0
-        
-        for _, comp in competitions.iterrows():
-            if checked_competitions >= 10:  # Check more competitions for ID verification
-                break
-                
+        """Verify a player ID exists in the dataset."""
+        print(f"Verifying player ID: {self.player_id}, type: {type(self.player_id)}")
+    
+        # Ensure player_id is a float (StatsBomb IDs are always floats)
+        if not isinstance(self.player_id, float):
             try:
-                matches = sb.matches(competition_id=comp['competition_id'], season_id=comp['season_id'])
-                if matches.empty:
+                self.player_id = float(self.player_id)
+                print(f"Converted player_id to float: {self.player_id}")
+            except (ValueError, TypeError):
+                print(f"Invalid player ID format: {self.player_id}")
+                return False
+    
+        # Try to find the player in available competitions
+        try:
+            competitions = sb.competitions()
+            if competitions is None or competitions.empty:
+                print("Failed to retrieve competitions")
+                return False
+        
+            competitions = competitions.sort_values('season_id', ascending=False)
+            checked_competitions = 0
+        
+            for _, comp in competitions.iterrows():
+                if checked_competitions >= 15:  # Limit to 15 competitions to avoid too long searches
+                    break
+                
+                try:
+                    matches = sb.matches(competition_id=comp['competition_id'], season_id=comp['season_id'])
+                    if matches is None or matches.empty:
+                        continue
+                
+                    checked_competitions += 1
+                    print(f"Checking competition: {comp['competition_name']} {comp['season_name']}")
+                
+                    # Check first few matches
+                    for idx, match in matches.head(3).iterrows():
+                        match_id = match['match_id']
+                        try:
+                            events = sb.events(match_id=match_id)
+                            if events is None or events.empty:
+                                continue
+                        
+                            # Important: Use exact equality for float comparison
+                            player_info = events[events['player_id'] == self.player_id][['player_id', 'player']].drop_duplicates()
+                            if not player_info.empty:
+                                self.full_name = player_info.iloc[0]['player']
+                                print(f"Found player {self.full_name} (ID: {self.player_id})")
+                                return True
+                        except Exception as e:
+                            print(f"Error checking match {match_id}: {str(e)}")
+                            continue
+                except Exception as e:
+                    print(f"Error checking competition: {str(e)}")
                     continue
-                
-                checked_competitions += 1
-                print(f"Checking {comp['competition_name']} {comp['season_name']}...")
-                
-                # Check just one match
-                match_id = matches.iloc[0]['match_id']
-                events = sb.events(match_id=match_id)
-                
-                # Check if player exists
-                player_info = events[events['player_id'] == self.player_id][['player_id', 'player']].drop_duplicates()
-                if not player_info.empty:
-                    self.full_name = player_info.iloc[0]['player']
-                    print(f"Verified player ID {self.player_id}: Found {self.full_name}")
-                    print(f"Verification completed in {time.time() - start_time:.2f} seconds")
-                    return True
-            except Exception as e:
-                print(f"Error checking competition: {e}")
-                continue
-                
-        print(f"Could not verify player ID {self.player_id}. Please check if the ID is correct.")
-        print(f"Verification completed in {time.time() - start_time:.2f} seconds")
-        return False
+        
+            print(f"Player ID {self.player_id} not found after checking {checked_competitions} competitions")
+            return False
+        except Exception as e:
+            print(f"Error during player verification: {str(e)}")
+            return False
     
     def collect_player_data(self):
         """Collect player match and event data."""
