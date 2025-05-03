@@ -11,6 +11,9 @@ from routes.predictions import prediction_routes
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
+# Set longer timeout for worker processes
+os.environ['GUNICORN_CMD_ARGS'] = "--timeout 120"  # Increase to 120 seconds
+
 # Register blueprints
 app.register_blueprint(player_routes, url_prefix='/api/players')
 app.register_blueprint(prediction_routes, url_prefix='/api/predictions')
