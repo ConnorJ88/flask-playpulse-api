@@ -7,3 +7,4 @@ pandas==1.3.0  # Version that works with numpy 1.21
 matplotlib==3.4.2  # Compatible with numpy 1.21
 scikit-learn==1.0.1
 statsbombpy==1.4.0  # Older version that might have fewer dependencies
+flask-caching==2.0.2

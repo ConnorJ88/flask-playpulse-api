@@ -60,50 +60,51 @@ def validate_player(player_id):
 
 @player_routes.route('/<player_id>/performances', methods=['GET'])
 def get_player_performances(player_id):
-    """Get player performance metrics"""
+    """Get player performance metrics with timeouts and retries"""
     try:
+        from flask import current_app
+        import time
+        
         # Convert player_id to float
-        print(f"Performance request for player_id: {player_id}")
         player_id_float = float(player_id)
         
-        # Create collector with timeout handling
-        collector = PlayerDataCollector(player_id=player_id_float, max_matches=5)  # Reduce to 5 matches for speed
+        # Add query parameter to control max matches
+        max_matches = request.args.get('max_matches', default=10, type=int)
+        max_matches = min(max_matches, 8)  # Cap at 8 to prevent timeouts
         
-        # Add timeout handling
-        import signal
+        # Start collector with reduced max_matches
+        collector = PlayerDataCollector(player_id=player_id_float, max_matches=max_matches)
         
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Data collection timed out")
+        # First attempt with 8 matches
+        start_time = time.time()
+        print(f"Performance request for player_id: {player_id}")
         
-        # Set 45 second timeout for data collection
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(45)
+        success = collector.collect_player_data()
         
-        try:
-            if not collector.collect_player_data():
-                signal.alarm(0)  # Disable alarm
+        if not success:
+            # If first attempt failed with timeout, retry with fewer matches
+            if hasattr(collector, 'timeout_occurred') and collector.timeout_occurred:
+                print("Request failed, retrying with fewer matches")
+                collector.max_matches = 5  # Reduce matches further
+                success = collector.collect_player_data()
+                
+                if not success:
+                    return jsonify({'error': 'Failed to collect player data after retry'}), 500
+            else:
                 return jsonify({'error': 'Failed to collect player data'}), 404
-            
-            if not collector.calculate_performance_metrics():
-                signal.alarm(0)  # Disable alarm
-                return jsonify({'error': 'Failed to calculate performance metrics'}), 500
-            
-            # Convert performance metrics to JSON
-            performances = collector.performance_metrics.to_dict(orient='records')
-            
-            # Disable alarm
-            signal.alarm(0)
-            
-            return jsonify(performances)
-        except TimeoutError as e:
-            print(f"Timeout during data collection: {e}")
-            return jsonify({'error': 'Data collection timed out. Please try again.'}), 504
-        finally:
-            # Ensure alarm is disabled
-            signal.alarm(0)
-            
+        
+        if not collector.calculate_performance_metrics():
+            return jsonify({'error': 'Failed to calculate performance metrics'}), 500
+        
+        # Convert performance metrics to JSON
+        performances = collector.performance_metrics.to_dict(orient='records')
+        
+        # Log processing time
+        processing_time = time.time() - start_time
+        print(f"Performance request completed in {processing_time:.2f} seconds")
+        
+        return jsonify(performances)
     except ValueError:
         return jsonify({'error': 'Invalid player ID format'}), 400
     except Exception as e:
-        print(f"Error in get_player_performances: {e}")
         return jsonify({'error': str(e)}), 500
