@@ -1,57 +1,48 @@
 # routes/predictions.py
 from flask import Blueprint, request, jsonify
-import pandas as pd
-from services.ml_models import PlayerPerformancePredictor
-from services.data_collection import PlayerDataCollector
+from app import cache
+from tasks import collect_player_data_task
 
 prediction_routes = Blueprint('prediction_routes', __name__)
 
-@prediction_routes.route('/player/<int:player_id>', methods=['GET'])
+@prediction_routes.route('/player/<player_id>', methods=['GET'])
 def predict_player_performance(player_id):
-    """Predict player performance"""
+    """Predict player performance using async processing"""
     try:
-        # Collect player data
-        collector = PlayerDataCollector(player_id=player_id)
+        # Check if data already available in cache
+        cache_key = f"player_data_{player_id}"
+        player_data = cache.get(cache_key)
         
-        if not collector.collect_player_data():
-            return jsonify({'error': 'Failed to collect player data'}), 404
+        if player_data and player_data.get('predictions'):
+            # Return the prediction portion only
+            return jsonify(player_data['predictions'])
         
-        if not collector.calculate_performance_metrics():
-            return jsonify({'error': 'Failed to calculate performance metrics'}), 500
+        # Check if processing already in progress
+        job_key = f"player_job_{player_id}"
+        job_id = cache.get(job_key)
         
-        # Create predictor and train models
-        predictor = PlayerPerformancePredictor(collector.performance_metrics)
+        if job_id:
+            # Job already in progress
+            return jsonify({
+                'status': 'processing',
+                'message': 'Data is being processed',
+                'job_id': job_id
+            }), 202
         
-        if not predictor.train_models():
-            return jsonify({'error': 'Failed to train prediction models'}), 500
+        # Start new processing task
+        max_matches = int(request.args.get('max_matches', 7))
+        task = collect_player_data_task.delay(player_id, max_matches)
         
-        # Make prediction
-        ensemble_pred, perf_change = predictor.predict_next_performance()
+        # Cache the job ID
+        cache.set(job_key, task.id, timeout=600)  # 10 minutes
         
-        # Get current values
-        current_metrics = collector.performance_metrics.iloc[-1].to_dict()
+        return jsonify({
+            'status': 'processing',
+            'message': 'Performance prediction started',
+            'job_id': task.id
+        }), 202
         
-        # Prepare response - include predictions for all metrics
-        response = {
-            'pass_completion_rate': {
-                'current_value': float(current_metrics['pass_completion_rate']),
-                'predicted_value': float(ensemble_pred),
-                'percentage_change': float(perf_change)
-            }
-        }
-        
-        # Add simplified predictions for other metrics
-        for metric in ['total_events', 'total_passes', 'defensive_actions']:
-            current_value = float(current_metrics[metric])
-            # Simple prediction based on completion rate change (you may want to improve this)
-            pred_value = current_value * (1 + perf_change)
-            
-            response[metric] = {
-                'current_value': current_value,
-                'predicted_value': float(pred_value),
-                'percentage_change': float(perf_change)
-            }
-        
-        return jsonify(response)
+    except ValueError:
+        return jsonify({'error': 'Invalid player ID format'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500

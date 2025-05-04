@@ -1,16 +1,18 @@
 # routes/players.py
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from services.data_collection import PlayerDataCollector
+from app import cache
+from tasks import collect_player_data_task
+import time
 
 player_routes = Blueprint('player_routes', __name__)
 
 @player_routes.route('/<player_id>', methods=['GET'])
-@player_routes.route('/<player_id>', methods=['GET'])
 def get_player(player_id):
     """Get player details by ID"""
-    print(f"API received player_id: {player_id}, type: {type(player_id)}")
-    
     try:
+        print(f"API received player_id: {player_id}, type: {type(player_id)}")
+        
         # Convert player_id to float
         player_id_float = float(player_id)
         print(f"Converted to float: {player_id_float}")
@@ -25,8 +27,6 @@ def get_player(player_id):
             print(f"Player not found with ID: {player_id_float}")
             return jsonify({'error': 'Player not found'}), 404
         
-        # Rest of your code...
-        
         # Return basic player info
         return jsonify({
             'id': collector.player_id,
@@ -39,72 +39,123 @@ def get_player(player_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@player_routes.route('/validate/<player_id>', methods=['GET'])
-def validate_player(player_id):
-    """Validate if a player ID exists"""
+@player_routes.route('/<player_id>/performances', methods=['GET'])
+def get_player_performances(player_id):
+    """Get player performance metrics with async processing"""
     try:
-        # Convert player_id to float
-        player_id_float = float(player_id)
+        # Force processing using the query parameter ?force=true
+        force_processing = request.args.get('force', 'false').lower() == 'true'
         
-        collector = PlayerDataCollector(player_id=player_id_float)
-        exists = collector._verify_player_id()
+        # Check if data is already cached
+        cache_key = f"player_data_{player_id}"
+        cached_data = None if force_processing else cache.get(cache_key)
         
-        if exists:
-            return jsonify({'valid': True, 'name': collector.full_name})
-        else:
-            return jsonify({'valid': False}), 404
+        if cached_data:
+            print(f"Returning cached data for player_id: {player_id}")
+            return jsonify(cached_data["performances"])
+        
+        # Check if there's an active job
+        job_key = f"player_job_{player_id}"
+        job_id = cache.get(job_key)
+        
+        if job_id and not force_processing:
+            # Job already in progress
+            return jsonify({
+                'status': 'processing',
+                'message': 'Data collection is already in progress',
+                'job_id': job_id
+            }), 202
+        
+        # Get max matches param, default to 7
+        max_matches = int(request.args.get('max_matches', 7))
+        max_matches = min(max_matches, 10)  # Cap at 10 matches
+        
+        # Start new task
+        print(f"Performance request for player_id: {player_id}")
+        task = collect_player_data_task.delay(player_id, max_matches)
+        
+        # Cache the job ID
+        cache.set(job_key, task.id, timeout=600)  # 10 minutes
+        
+        return jsonify({
+            'status': 'processing',
+            'message': 'Data collection started',
+            'job_id': task.id,
+            'max_matches': max_matches
+        }), 202
+        
     except ValueError:
         return jsonify({'error': 'Invalid player ID format'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@player_routes.route('/<player_id>/performances', methods=['GET'])
-def get_player_performances(player_id):
-    """Get player performance metrics with timeouts and retries"""
+@player_routes.route('/<player_id>/performances/status/<job_id>', methods=['GET'])
+def get_performance_job_status(player_id, job_id):
+    """Check status of an async job"""
     try:
-        from flask import current_app
-        import time
+        # Check if results already cached
+        cache_key = f"player_data_{player_id}"
+        cached_data = cache.get(cache_key)
         
-        # Convert player_id to float
-        player_id_float = float(player_id)
+        if cached_data:
+            return jsonify({
+                'status': 'completed',
+                'data': cached_data
+            })
         
-        # Add query parameter to control max matches
-        max_matches = request.args.get('max_matches', default=10, type=int)
-        max_matches = min(max_matches, 8)  # Cap at 8 to prevent timeouts
+        # Check job status
+        task = collect_player_data_task.AsyncResult(job_id)
         
-        # Start collector with reduced max_matches
-        collector = PlayerDataCollector(player_id=player_id_float, max_matches=max_matches)
-        
-        # First attempt with 8 matches
-        start_time = time.time()
-        print(f"Performance request for player_id: {player_id}")
-        
-        success = collector.collect_player_data()
-        
-        if not success:
-            # If first attempt failed with timeout, retry with fewer matches
-            if hasattr(collector, 'timeout_occurred') and collector.timeout_occurred:
-                print("Request failed, retrying with fewer matches")
-                collector.max_matches = 5  # Reduce matches further
-                success = collector.collect_player_data()
-                
-                if not success:
-                    return jsonify({'error': 'Failed to collect player data after retry'}), 500
-            else:
-                return jsonify({'error': 'Failed to collect player data'}), 404
-        
-        if not collector.calculate_performance_metrics():
-            return jsonify({'error': 'Failed to calculate performance metrics'}), 500
-        
-        # Convert performance metrics to JSON
-        performances = collector.performance_metrics.to_dict(orient='records')
-        
-        # Log processing time
-        processing_time = time.time() - start_time
-        print(f"Performance request completed in {processing_time:.2f} seconds")
-        
-        return jsonify(performances)
-    except ValueError:
-        return jsonify({'error': 'Invalid player ID format'}), 400
+        if task.state == 'PENDING':
+            return jsonify({
+                'status': 'pending',
+                'message': 'Job is in the queue'
+            })
+        elif task.state == 'FAILURE':
+            return jsonify({
+                'status': 'failed',
+                'message': str(task.info)
+            })
+        elif task.state == 'SUCCESS':
+            result = task.get()
+            # Cache results if successful
+            if result.get('status') == 'success':
+                cache.set(cache_key, result, timeout=86400)  # 24 hours
+            return jsonify({
+                'status': 'completed',
+                'data': result
+            })
+        else:
+            # Still processing
+            return jsonify({
+                'status': 'processing',
+                'message': 'Job is in progress'
+            })
+            
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+@player_routes.route('/<player_id>/performances/cancel/<job_id>', methods=['POST'])
+def cancel_performance_job(player_id, job_id):
+    """Cancel an in-progress job"""
+    try:
+        # Remove job marker
+        job_key = f"player_job_{player_id}"
+        cache.delete(job_key)
+        
+        # Revoke task
+        collect_player_data_task.AsyncResult(job_id).revoke(terminate=True)
+        
+        return jsonify({
+            'status': 'cancelled',
+            'message': 'Job cancelled successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
