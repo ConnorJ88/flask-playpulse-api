@@ -148,7 +148,7 @@ class PlayerDataCollector:
             start_time = time.time()
         
             # IMPORTANT: Hard cap on matches to analyze
-            effective_max_matches = min(self.max_matches, 5)  # Never more than 5 matches
+            effective_max_matches = min(self.max_matches, 30)  # Never more than 30 matches
 
             # Get competitions (prioritize more recent ones)
             competitions = sb.competitions()
@@ -161,7 +161,7 @@ class PlayerDataCollector:
             team_performances = {}
         
             # IMPORTANT: Hard cap on competitions to check
-            competitions_to_check = min(3, len(competitions))
+            competitions_to_check = min(15, len(competitions))
         
             # Only check the most recent competitions
             for idx, (_, comp) in enumerate(competitions.iterrows()):
@@ -182,7 +182,7 @@ class PlayerDataCollector:
                     matches = matches.sort_values('match_date', ascending=False)
                 
                     # IMPORTANT: Hard cap on matches per competition
-                    matches_to_check = min(3, len(matches))
+                    matches_to_check = min(30, len(matches))
 
                     # Process only the most recent matches
                     for match_idx, (_, match) in enumerate(matches.iterrows()):
