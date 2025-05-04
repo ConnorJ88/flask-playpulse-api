@@ -205,72 +205,104 @@ class PlayerPerformancePredictor:
         
         return True
     
-    def predict_next_performance(self):
-        """Predict next performance and check for decline."""
-        if not self.models:
-            print("Models not trained. Run train_models() first.")
-            return
+    # Update predict_next_performance method in services/ml_models.py to handle limited data better
+def predict_next_performance(self):
+    """Predict next performance and check for decline with fallback for limited data."""
+    if not self.models:
+        print("Models not trained. Run train_models() first.")
+        return None, None
+    
+    if self.performance_metrics is None or len(self.performance_metrics) < 3:
+        print("Not enough performance data for prediction")
+        return None, None
+    
+    # If we have limited data (3-4 matches), use simple predictions
+    if len(self.performance_metrics) < 5:
+        print("Using simple prediction with limited data")
         
-        if self.performance_metrics is None or len(self.performance_metrics) < self.models['window_size']:
-            print("Not enough performance data for prediction")
-            return
-        
-        # Get most recent data
-        recent_data = self.performance_metrics[self.models['features']].tail(self.models['window_size']).values
-        
-        # Scale the data
-        scaled_data = self.models['scaler'].transform(recent_data)
-        
-        # Prepare input for models (2D)
-        X_reshaped = scaled_data.reshape(1, scaled_data.shape[0] * scaled_data.shape[1])
-        
-        # Make predictions for each feature using the best model
         predictions = {}
         changes = {}
-        declining_features = []
         
-        print("\nPerformance Predictions:")
+        # Get the features we want to predict
+        features = ['pass_completion_rate', 'total_events', 'total_passes', 'defensive_actions']
         
-        for feature in self.models['features']:
-            # Get the best model for this feature
-            best_model_info = self.models['best_models'][feature]
-            best_model = best_model_info['model']
-            model_type = best_model_info['model_type']
+        # Calculate simple predictions based on average trend
+        for feature in features:
+            values = self.performance_metrics[feature].values
             
-            # Get prediction from the best model
-            prediction = best_model.predict(X_reshaped)[0]
+            # Calculate average change over available matches
+            changes_between_matches = [values[i] - values[i-1] for i in range(1, len(values))]
+            avg_change = sum(changes_between_matches) / len(changes_between_matches)
             
-            # Get current feature value
-            feature_idx = self.models['features'].index(feature)
-            current_value = scaled_data[-1, feature_idx]
+            # Predict next value
+            current_value = values[-1]
+            next_value = current_value + avg_change
             
             # Calculate percentage change
-            perc_change = (prediction - current_value) / current_value if current_value != 0 else 0
+            perc_change = avg_change / current_value if current_value != 0 else 0
             
-            # Store results
-            predictions[feature] = prediction
+            # Store predictions
+            predictions[feature] = next_value
             changes[feature] = perc_change
-            
-            # Format feature name for display
-            display_name = feature.replace('_', ' ').title()
-            
-            # Print prediction for this feature
-            print(f"{display_name} (using {model_type.replace('_', ' ').title()}):")
-            print(f"  Current: {current_value:.4f}")
-            print(f"  Predicted: {prediction:.4f}")
-            print(f"  Change: {perc_change:.2%}")
-            
-            # Check for decline
-            if perc_change <= -self.decline_threshold:
-                declining_features.append((feature, perc_change))
-        
-        # Alert for any declining features
-        if declining_features:
-            self._alert_decline(declining_features)
-        else:
-            print("\nNo significant performance decline predicted.")
         
         return predictions, changes
+    
+    # Get most recent data for full prediction
+    recent_data = self.performance_metrics[self.models['features']].tail(self.models['window_size']).values
+    
+    # Scale the data
+    scaled_data = self.models['scaler'].transform(recent_data)
+    
+    # Prepare input for models (2D)
+    X_reshaped = scaled_data.reshape(1, scaled_data.shape[0] * scaled_data.shape[1])
+    
+    # Make predictions for each feature using the best model
+    predictions = {}
+    changes = {}
+    declining_features = []
+    
+    print("\nPerformance Predictions:")
+    
+    for feature in self.models['features']:
+        # Get the best model for this feature
+        best_model_info = self.models['best_models'][feature]
+        best_model = best_model_info['model']
+        model_type = best_model_info['model_type']
+        
+        # Get prediction from the best model
+        prediction = best_model.predict(X_reshaped)[0]
+        
+        # Get current feature value
+        feature_idx = self.models['features'].index(feature)
+        current_value = scaled_data[-1, feature_idx]
+        
+        # Calculate percentage change
+        perc_change = (prediction - current_value) / current_value if current_value != 0 else 0
+        
+        # Store results
+        predictions[feature] = prediction
+        changes[feature] = perc_change
+        
+        # Format feature name for display
+        display_name = feature.replace('_', ' ').title()
+        
+        # Print prediction for this feature
+        print(f"{display_name} (using {model_type.replace('_', ' ').title()}):")
+        print(f"  Current: {current_value:.4f}")
+        print(f"  Predicted: {prediction:.4f}")
+        print(f"  Change: {perc_change:.2%}")
+        
+        # Check for decline
+        if perc_change <= -self.decline_threshold:
+            declining_features.append((feature, perc_change))
+    
+    # Alert for any declining features
+    if declining_features:
+        self._alert_decline(declining_features)
+    else:
+        print("\nNo significant performance decline predicted.")
+    
+    return predictions, changes
     
     def _alert_decline(self, declining_features):
         """Send an alert when predicted decrease is by 5% or more in any feature."""
