@@ -148,7 +148,7 @@ class PlayerDataCollector:
             start_time = time.time()
         
             # IMPORTANT: Hard cap on matches to analyze
-            effective_max_matches = min(self.max_matches, 30)  # Never more than 30 matches
+            effective_max_matches = min(self.max_matches, 10)  # Never more than 10 matches
 
             # Get competitions (prioritize more recent ones)
             competitions = sb.competitions()
