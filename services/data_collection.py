@@ -137,37 +137,9 @@ class PlayerDataCollector:
             return False
     
     def collect_player_data(self):
-        """Collect player match and event data with aggressive timeouts."""
-        import signal
-        import threading
-    
-    # Flag for timeout
-        self.timeout_occurred = False
-    
-    # Setup timeout handler
-        class TimeoutException(Exception):
-            pass
-    
-        def timeout_handler(signum, frame):
-            self.timeout_occurred = True
-            raise TimeoutException("Data collection timed out")
-    
-        # Set 20-second timeout (well below the 30s worker timeout)
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(20)
-    
+        """Collect player match and event data with hard limits."""
         try:
-            # Player verification
-            if self.player_id is None:
-                if not self.find_player():
-                    print("Failed to find player. Please try again with a valid name or ID.")
-                    return False
-            else:
-                # Skip verification if we already have the name (optimization)
-                if self.full_name is None and not self._verify_player_id():
-                    print("Failed to verify player ID. Please try again with a valid ID.")
-                    return False
-        
+            # Double-check that we have the player's name
             if self.full_name is None:
                 print("No player name found. Something went wrong during player verification.")
                 return False
@@ -175,29 +147,27 @@ class PlayerDataCollector:
             print(f"Getting data for {self.full_name} (ID: {self.player_id})...")
             start_time = time.time()
         
-            # CRITICAL: Reduce max matches to analyze - this is the main performance lever
-            effective_max_matches = min(self.max_matches, 8)  # Never analyze more than 8 matches
-        
+            # IMPORTANT: Hard cap on matches to analyze
+            effective_max_matches = min(self.max_matches, 5)  # Never more than 5 matches
+
             # Get competitions (prioritize more recent ones)
             competitions = sb.competitions()
             competitions = competitions.sort_values('season_id', ascending=False)
-
-            # Track matches where we've found the player
+        
+            # Initialize data structures
             player_matches = []
             all_player_events = pd.DataFrame()
             matches_found = 0
             team_performances = {}
         
-            # CRITICAL: Only check most recent 3 competitions
-            max_competitions_to_check = 3
-            competitions_checked = 0
+            # IMPORTANT: Hard cap on competitions to check
+            competitions_to_check = min(3, len(competitions))
         
-            # Go through competitions from most recent
-            for _, comp in competitions.iterrows():
-                if matches_found >= effective_max_matches or competitions_checked >= max_competitions_to_check:
+            # Only check the most recent competitions
+            for idx, (_, comp) in enumerate(competitions.iterrows()):
+                if idx >= competitions_to_check or matches_found >= effective_max_matches:
                     break
                 
-                competitions_checked += 1
                 comp_id = comp['competition_id']
                 season_id = comp['season_id']
             
@@ -211,69 +181,49 @@ class PlayerDataCollector:
                     matches['match_date'] = pd.to_datetime(matches['match_date'])
                     matches = matches.sort_values('match_date', ascending=False)
                 
-                    # CRITICAL: Only check 5 most recent matches per competition
-                    max_matches_per_competition = min(5, len(matches))
-                    matches = matches.iloc[:max_matches_per_competition]
-                
-                    # Process each match
-                    for _, match in matches.iterrows():
-                        if matches_found >= effective_max_matches:
-                            break
-                    
-                        # Check if timeout occurred
-                        if self.timeout_occurred:
-                            print("Timeout occurred. Stopping match processing.")
+                    # IMPORTANT: Hard cap on matches per competition
+                    matches_to_check = min(3, len(matches))
+
+                    # Process only the most recent matches
+                    for match_idx, (_, match) in enumerate(matches.iterrows()):
+                        if match_idx >= matches_to_check or matches_found >= effective_max_matches:
                             break
                         
                         match_id = match['match_id']
-
+                    
                         try:
                             # Get events for this match
                             events = sb.events(match_id=match_id)
                         
-                            # Efficiently check if player is in this match
-                            if (events['player_id'] == self.player_id).any():
+                            # Check if player is in this match
+                            player_events = events[events['player_id'] == self.player_id]
+                        
+                            if not player_events.empty:
                                 # Player found in this match
-                                player_events = events[events['player_id'] == self.player_id].copy()
                                 matches_found += 1
                                 print(f"Found match {matches_found}/{effective_max_matches}: {match['home_team']} vs {match['away_team']} ({match['match_date'].date()})")
                             
-                                # Add match info directly
-                                player_events['match_id'] = match_id
-                                player_events['match_date'] = match['match_date']
-                                player_events['competition'] = comp['competition_name']
-                                player_events['season'] = comp['season_name']
-                                player_events['home_team'] = match['home_team']
-                                player_events['away_team'] = match['away_team']
-                            
-                                # Minimal team detection - only if we have events
-                                if len(player_events) > 0:
-                                    first_event = player_events.iloc[0]
-                                    # Use simpler team detection
-                                    player_team = None
-                                    if 'team' in player_events.columns:
-                                        if hasattr(first_event, 'team'):
-                                            if isinstance(first_event.team, str):
-                                                player_team = first_event.team
+                            # Add minimal event data
+                                try:
+                                    # Create a copy to avoid modifying the original
+                                    player_events_minimal = player_events.copy()
+
+                                    # Add match info directly
+                                    player_events_minimal['match_id'] = match_id
+                                    player_events_minimal['match_date'] = match['match_date']
+                                    player_events_minimal['competition'] = comp['competition_name']
+                                    player_events_minimal['season'] = comp['season_name']
+                                    player_events_minimal['home_team'] = match['home_team']
+                                    player_events_minimal['away_team'] = match['away_team']
                                 
-                                    if player_team:
-                                        player_events['player_team'] = player_team
-                                        # Simplified team metrics - just count passes
-                                        team_passes = events[events['team'] == player_team]
-                                        team_passes = team_passes[team_passes['type'] == 'Pass']
-                                        team_performances[match_id] = {
-                                            'team': player_team,
-                                            'total_passes': len(team_passes),
-                                            'pass_completion': 0,  # Skip complex calculations
-                                            'total_events': 0  # Skip complex calculations
-                                        }
-                            
-                                # Add events
-                                if all_player_events.empty:
-                                    all_player_events = player_events
-                                else:
-                                    # Concat is slow - only do this if necessary
-                                    all_player_events = pd.concat([all_player_events, player_events])
+                                    # Append events
+                                    if all_player_events.empty:
+                                        all_player_events = player_events_minimal
+                                    else:
+                                        all_player_events = pd.concat([all_player_events, player_events_minimal])
+                                except Exception as e:
+                                    print(f"Error processing events for match {match_id}: {e}")
+                                    continue
                             
                                 # Save match info
                                 player_matches.append({
@@ -293,53 +243,24 @@ class PlayerDataCollector:
                     print(f"Error with competition {comp_id}-{season_id}: {e}")
                     continue
         
-            # Create DataFrame of matches - but only if we have matches
-            if player_matches:
-                matches_df = pd.DataFrame(player_matches)
-            else:
-                matches_df = pd.DataFrame()
-        
+            # Create DataFrame of matches
+            matches_df = pd.DataFrame(player_matches) if player_matches else pd.DataFrame()
+
             processing_time = time.time() - start_time
             print(f"Data collection completed in {processing_time:.2f} seconds")
         
             if matches_found > 0:
-                print(f"Found {matches_found} matches with player participation")
                 self.player_events = all_player_events
                 self.player_matches = matches_df
                 self.team_performances = team_performances
-            
-                # Cancel timeout alarm
-                signal.alarm(0)
                 return True
             else:
                 print(f"No matches found for {self.full_name}. The player might not have recent match data available.")
-            
-                # Cancel timeout alarm
-                signal.alarm(0)
                 return False
-    
-        except TimeoutException:
-            print(f"WARNING: Data collection timed out after 20 seconds")
-        
-            # If we have at least some matches, consider it a success
-            if 'matches_found' in locals() and matches_found > 0:
-                if 'all_player_events' in locals() and not all_player_events.empty:
-                    print(f"Returning partial data from {matches_found} matches")
-                    matches_df = pd.DataFrame(player_matches)
-                    self.player_events = all_player_events
-                    self.player_matches = matches_df
-                    self.team_performances = team_performances
-                return True
-        
-            return False
-    
+            
         except Exception as e:
-            print(f"Error during data collection: {e}")
+            print(f"Error in collect_player_data: {e}")
             return False
-    
-        finally:
-            # Always cancel the alarm
-            signal.alarm(0)
     
     def calculate_performance_metrics(self):
         """Calculate performance metrics for each match and filter anomalies."""

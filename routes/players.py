@@ -30,8 +30,48 @@ def background_data_collection(player_id, max_matches=7):
         # Create collector with reduced matches
         collector = PlayerDataCollector(player_id=player_id_float, max_matches=max_matches)
         
-        # Collect data
-        if not collector.collect_player_data():
+        # Update status for client
+        job_status[player_id]['message'] = 'Verifying player ID...'
+        
+        # First step: verify player
+        if not collector._verify_player_id():
+            job_status[player_id] = {
+                'status': 'failed',
+                'end_time': time.time(),
+                'message': 'Failed to verify player ID'
+            }
+            return
+        
+        # Update status for client
+        job_status[player_id]['message'] = f'Collecting data for {collector.full_name}...'
+            
+        # Collect data - DON'T use signal module in threads
+        success = False
+        try:
+            # Add a time limit by using a simple approach
+            start_collection = time.time()
+            collection_timeout = 100  # 100 second limit
+            
+            # Create a thread-local flag for timeout
+            timeout_occurred = False
+            
+            # Set reduced parameters
+            collector.max_matches = min(max_matches, 5)  # Never process more than 5 matches
+            
+            # Call collect data
+            success = collector.collect_player_data()
+            
+            # Check if we exceeded the time limit
+            if time.time() - start_collection > collection_timeout:
+                timeout_occurred = True
+                print("Collection time limit exceeded")
+                success = False
+                
+        except Exception as e:
+            print(f"Error in data collection: {e}")
+            success = False
+            
+        if not success:
             job_status[player_id] = {
                 'status': 'failed',
                 'end_time': time.time(),
@@ -39,6 +79,9 @@ def background_data_collection(player_id, max_matches=7):
             }
             return
             
+        # Update status for client
+        job_status[player_id]['message'] = 'Calculating performance metrics...'
+        
         # Calculate metrics
         if not collector.calculate_performance_metrics():
             job_status[player_id] = {
@@ -161,7 +204,8 @@ def get_performance_job_status(player_id):
             if cache_age < 86400:
                 return jsonify({
                     'status': 'completed',
-                    'data': performance_cache[player_id]['data']
+                    'data': performance_cache[player_id]['data'],
+                    'player_name': performance_cache[player_id].get('player_name', 'Unknown')
                 })
         
         # Check job status
@@ -170,10 +214,17 @@ def get_performance_job_status(player_id):
             
             if status_info['status'] == 'completed':
                 # Job completed successfully
-                return jsonify({
-                    'status': 'completed',
-                    'data': performance_cache.get(player_id, {}).get('data', [])
-                })
+                if player_id in performance_cache:
+                    return jsonify({
+                        'status': 'completed',
+                        'data': performance_cache[player_id]['data'],
+                        'player_name': performance_cache[player_id].get('player_name', 'Unknown')
+                    })
+                else:
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Data processing completed but no data found'
+                    })
             elif status_info['status'] == 'failed':
                 # Job failed
                 return jsonify({
@@ -183,9 +234,11 @@ def get_performance_job_status(player_id):
             else:
                 # Job still running
                 elapsed = time.time() - status_info['start_time']
+                message = status_info.get('message', 'Processing in progress')
                 return jsonify({
                     'status': 'processing',
-                    'message': f'Job is in progress (running for {elapsed:.1f} seconds)'
+                    'message': f'{message} (running for {elapsed:.1f} seconds)',
+                    'elapsed': elapsed
                 })
         else:
             # No job found
@@ -195,6 +248,7 @@ def get_performance_job_status(player_id):
             })
             
     except Exception as e:
+        print(f"Error in status endpoint: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)
