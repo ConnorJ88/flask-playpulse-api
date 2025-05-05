@@ -1,2 +1,2 @@
-web: gunicorn app:app --config gunicorn_config.py
+web: gunicorn --timeout 300 --workers 1 app:app
 worker: celery -A app.celery worker --loglevel=info
