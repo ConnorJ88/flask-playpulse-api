@@ -1,124 +1,41 @@
-# routes/players.py
-# routes/players.py
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify
 from services.data_collection import PlayerDataCollector
-import threading
-import time
-import json
 import os
-from datetime import datetime
-
-# Simple in-memory cache
-performance_cache = {}
-job_status = {}
+import pickle
+import time
 
 player_routes = Blueprint('player_routes', __name__)
 
-def background_data_collection(player_id, max_matches=7):
-    """Background task to collect and process player data"""
+# Cache helper functions
+def get_cached_data(cache_file, max_age_hours=24):
+    """Get data from cache if available and not too old."""
     try:
-        # Set job as running
-        job_status[player_id] = {
-            'status': 'running',
-            'start_time': time.time(),
-            'message': 'Processing started'
-        }
-        
-        # Convert ID to float
-        player_id_float = float(player_id)
-        
-        # Create collector with reduced matches
-        collector = PlayerDataCollector(player_id=player_id_float, max_matches=max_matches)
-        
-        # Update status for client
-        job_status[player_id]['message'] = 'Verifying player ID...'
-        
-        # First step: verify player
-        if not collector._verify_player_id():
-            job_status[player_id] = {
-                'status': 'failed',
-                'end_time': time.time(),
-                'message': 'Failed to verify player ID'
-            }
-            return
-        
-        # Update status for client
-        job_status[player_id]['message'] = f'Collecting data for {collector.full_name}...'
-            
-        # Collect data - DON'T use signal module in threads
-        success = False
-        try:
-            # Add a time limit by using a simple approach
-            start_collection = time.time()
-            collection_timeout = 100  # 100 second limit
-            
-            # Create a thread-local flag for timeout
-            timeout_occurred = False
-            
-            # Set reduced parameters
-            collector.max_matches = min(max_matches, 5)  # Never process more than 5 matches
-            
-            # Call collect data
-            success = collector.collect_player_data()
-            
-            # Check if we exceeded the time limit
-            if time.time() - start_collection > collection_timeout:
-                timeout_occurred = True
-                print("Collection time limit exceeded")
-                success = False
-                
-        except Exception as e:
-            print(f"Error in data collection: {e}")
-            success = False
-            
-        if not success:
-            job_status[player_id] = {
-                'status': 'failed',
-                'end_time': time.time(),
-                'message': 'Failed to collect player data'
-            }
-            return
-            
-        # Update status for client
-        job_status[player_id]['message'] = 'Calculating performance metrics...'
-        
-        # Calculate metrics
-        if not collector.calculate_performance_metrics():
-            job_status[player_id] = {
-                'status': 'failed',
-                'end_time': time.time(),
-                'message': 'Failed to calculate performance metrics'
-            }
-            return
-        
-        # Convert to dict
-        performances = collector.performance_metrics.to_dict(orient='records')
-        
-        # Store in cache
-        performance_cache[player_id] = {
-            'data': performances,
-            'timestamp': time.time(),
-            'player_name': collector.full_name
-        }
-        
-        # Update job status
-        job_status[player_id] = {
-            'status': 'completed',
-            'end_time': time.time(),
-            'message': 'Data processing completed'
-        }
-        
+        if os.path.exists(cache_file):
+            cache_age = time.time() - os.path.getmtime(cache_file)
+            # Use cache if not too old
+            if cache_age < max_age_hours * 60 * 60:
+                print(f"Loading from cache: {cache_file}")
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
     except Exception as e:
-        print(f"Error in background task: {e}")
-        job_status[player_id] = {
-            'status': 'failed',
-            'end_time': time.time(),
-            'message': str(e)
-        }
+        print(f"Error reading cache: {e}")
+    return None
+
+def save_to_cache(cache_file, data):
+    """Save data to cache file."""
+    try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f)
+        print(f"Saved to cache: {cache_file}")
+        return True
+    except Exception as e:
+        print(f"Error saving to cache: {e}")
+        return False
 
 @player_routes.route('/<player_id>', methods=['GET'])
 def get_player(player_id):
-    """Get player details by ID"""
+    """Get player details by ID with caching"""
     print(f"API received player_id: {player_id}, type: {type(player_id)}")
     
     try:
@@ -126,6 +43,16 @@ def get_player(player_id):
         player_id_float = float(player_id)
         print(f"Converted to float: {player_id_float}")
         
+        # Check cache first
+        cache_dir = "cache/players"
+        cache_file = f"{cache_dir}/{player_id_float}.pkl"
+        cached_data = get_cached_data(cache_file, max_age_hours=168)  # 7 days
+        
+        if cached_data:
+            print(f"Returning cached data for player_id: {player_id_float}")
+            return jsonify(cached_data)
+        
+        # If not in cache, fetch from API
         collector = PlayerDataCollector(player_id=player_id_float)
         
         print(f"Verifying player ID: {player_id_float}")
@@ -137,119 +64,125 @@ def get_player(player_id):
             return jsonify({'error': 'Player not found'}), 404
         
         # Return basic player info
-        return jsonify({
+        player_data = {
             'id': collector.player_id,
             'name': collector.full_name,
-            'team': 'Unknown',
-            'position': 'Unknown'
-        })
+            'team': 'Unknown',  # Would need to be added to your data collector
+            'position': 'Unknown'  # Same here
+        }
+        
+        # Save to cache
+        save_to_cache(cache_file, player_data)
+        
+        return jsonify(player_data)
     except ValueError:
         return jsonify({'error': 'Invalid player ID format'}), 400
     except Exception as e:
+        print(f"Error in get_player: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@player_routes.route('/validate/<player_id>', methods=['GET'])
+def validate_player(player_id):
+    """Validate if a player ID exists with caching"""
+    try:
+        # Convert player_id to float
+        player_id_float = float(player_id)
+        
+        # Check cache first
+        cache_dir = "cache/validations"
+        cache_file = f"{cache_dir}/{player_id_float}.pkl"
+        cached_data = get_cached_data(cache_file, max_age_hours=336)  # 14 days
+        
+        if cached_data:
+            print(f"Returning cached validation for player_id: {player_id_float}")
+            return jsonify(cached_data)
+        
+        collector = PlayerDataCollector(player_id=player_id_float)
+        exists = collector._verify_player_id()
+        
+        result = {'valid': exists}
+        if exists:
+            result['name'] = collector.full_name
+        
+        # Save to cache
+        save_to_cache(cache_file, result)
+        
+        if exists:
+            return jsonify(result)
+        else:
+            return jsonify(result), 404
+    except ValueError:
+        return jsonify({'error': 'Invalid player ID format'}), 400
+    except Exception as e:
+        print(f"Error validating player ID: {e}")
         return jsonify({'error': str(e)}), 500
 
 @player_routes.route('/<player_id>/performances', methods=['GET'])
 def get_player_performances(player_id):
-    """Get player performance metrics with background processing"""
+    """Get player performance metrics with caching"""
     try:
-        # Check if data is already cached
-        if player_id in performance_cache:
-            cache_age = time.time() - performance_cache[player_id]['timestamp']
-            # If cache is less than 24 hours old, return it
-            if cache_age < 86400:
-                print(f"Returning cached data for player_id: {player_id}")
-                return jsonify(performance_cache[player_id]['data'])
+        # Convert player_id to float
+        player_id_float = float(player_id)
         
-        # Check if job is already running
-        if player_id in job_status and job_status[player_id]['status'] == 'running':
-            start_time = job_status[player_id]['start_time']
-            elapsed = time.time() - start_time
-            
-            return jsonify({
-                'status': 'processing',
-                'message': f'Data collection in progress (running for {elapsed:.1f} seconds)',
-                'player_id': player_id
-            }), 202
+        # Check cache first
+        cache_dir = "cache/performances"
+        cache_file = f"{cache_dir}/{player_id_float}.pkl"
+        cached_data = get_cached_data(cache_file, max_age_hours=48)  # 2 days
         
-        # Start new background thread
-        print(f"Performance request for player_id: {player_id}")
-        max_matches = int(request.args.get('max_matches', 7))
+        if cached_data:
+            print(f"Returning cached performances for player_id: {player_id_float}")
+            return jsonify(cached_data)
         
-        thread = threading.Thread(
-            target=background_data_collection,
-            args=(player_id, max_matches)
-        )
-        thread.daemon = True
-        thread.start()
+        print(f"Collecting performance data for player_id: {player_id_float}")
+        collector = PlayerDataCollector(player_id=player_id_float, max_matches=15)
         
-        return jsonify({
-            'status': 'processing',
-            'message': 'Data collection started',
-            'player_id': player_id
-        }), 202
+        if not collector.collect_player_data():
+            return jsonify({'error': 'Failed to collect player data'}), 404
         
+        if not collector.calculate_performance_metrics():
+            return jsonify({'error': 'Failed to calculate performance metrics'}), 500
+        
+        # Convert performance metrics to JSON
+        performances = collector.performance_metrics.to_dict(orient='records')
+        
+        # Save to cache
+        save_to_cache(cache_file, performances)
+        
+        return jsonify(performances)
     except ValueError:
         return jsonify({'error': 'Invalid player ID format'}), 400
     except Exception as e:
+        print(f"Error in get_player_performances: {e}")
         return jsonify({'error': str(e)}), 500
 
 @player_routes.route('/<player_id>/performances/status', methods=['GET'])
-def get_performance_job_status(player_id):
-    """Check status of a background job"""
+def get_performance_status(player_id):
+    """Check status of performance data collection"""
     try:
-        # Check if data is already cached
-        if player_id in performance_cache:
-            cache_age = time.time() - performance_cache[player_id]['timestamp']
-            # If cache is less than 24 hours old, consider it valid
-            if cache_age < 86400:
-                return jsonify({
-                    'status': 'completed',
-                    'data': performance_cache[player_id]['data'],
-                    'player_name': performance_cache[player_id].get('player_name', 'Unknown')
-                })
+        player_id_float = float(player_id)
         
-        # Check job status
-        if player_id in job_status:
-            status_info = job_status[player_id]
+        # Check if cached data exists
+        cache_dir = "cache/performances"
+        cache_file = f"{cache_dir}/{player_id_float}.pkl"
+        
+        if os.path.exists(cache_file):
+            cache_age = time.time() - os.path.getmtime(cache_file)
+            hours_old = cache_age / 3600
             
-            if status_info['status'] == 'completed':
-                # Job completed successfully
-                if player_id in performance_cache:
-                    return jsonify({
-                        'status': 'completed',
-                        'data': performance_cache[player_id]['data'],
-                        'player_name': performance_cache[player_id].get('player_name', 'Unknown')
-                    })
-                else:
-                    return jsonify({
-                        'status': 'error',
-                        'message': 'Data processing completed but no data found'
-                    })
-            elif status_info['status'] == 'failed':
-                # Job failed
-                return jsonify({
-                    'status': 'failed',
-                    'message': status_info['message']
-                })
-            else:
-                # Job still running
-                elapsed = time.time() - status_info['start_time']
-                message = status_info.get('message', 'Processing in progress')
-                return jsonify({
-                    'status': 'processing',
-                    'message': f'{message} (running for {elapsed:.1f} seconds)',
-                    'elapsed': elapsed
-                })
-        else:
-            # No job found
+            data_size = os.path.getsize(cache_file) / 1024  # Size in KB
+            
             return jsonify({
-                'status': 'not_found',
-                'message': 'No processing job found for this player'
+                'status': 'available',
+                'cached': True,
+                'cache_age_hours': round(hours_old, 2),
+                'data_size_kb': round(data_size, 2),
+                'player_id': player_id_float
             })
-            
-    except Exception as e:
-        print(f"Error in status endpoint: {e}")
+        
         return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+            'status': 'unavailable',
+            'message': 'Performance data not cached, will be collected on request',
+            'player_id': player_id_float
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
